@@ -27,7 +27,7 @@ class Handler(BaseHTTPRequestHandler):
 
         cfg = {
             "broker": f"tcp://{host}:{BROKER_PORT}",
-            "interval_sec": 10,
+            "interval_sec": 25,
             "topic_telemetry": f"devices/{req.get('device_id', 'unknown')}/telemetry",
             "topic_status": f"devices/{req.get('device_id', 'unknown')}/status",
             "topic_config": f"devices/{req.get('device_id', 'unknown')}/config",

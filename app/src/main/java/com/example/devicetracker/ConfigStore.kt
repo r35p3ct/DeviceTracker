@@ -47,7 +47,7 @@ class ConfigStore(context: Context) {
         set(value) = prefs.edit().putString("mqtt_pass", value).apply()
 
     var intervalSec: Int
-        get() = prefs.getInt("interval_sec", 15)
+        get() = prefs.getInt("interval_sec", 25)
         set(value) = prefs.edit().putInt("interval_sec", value).apply()
 
     var topicTelemetry: String

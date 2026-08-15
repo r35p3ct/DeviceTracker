@@ -1,5 +1,6 @@
 package com.example.devicetracker
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -15,8 +16,6 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken
@@ -32,8 +31,10 @@ class TrackerService : Service() {
     companion object {
         const val ACTION_START = "com.example.devicetracker.START"
         const val ACTION_STOP = "com.example.devicetracker.STOP"
+        const val ACTION_TICK = "com.example.devicetracker.TICK"
         private const val CHANNEL_ID = "tracker"
         private const val NOTIF_ID = 1
+        private const val ALARM_REQUEST_CODE = 100
     }
 
     private val scope = CoroutineScope(
@@ -72,12 +73,22 @@ class TrackerService : Service() {
                 stopTracking()
                 return START_NOT_STICKY
             }
+            ACTION_TICK -> {
+                scope.launch { tick() }
+                return START_STICKY
+            }
             else -> {
                 startForegroundCompat()
                 acquireWakeLock()
                 if (!running) {
                     running = true
-                    scope.launch { runLoop() }
+                    TrackerLog.add("service started (device ${store.deviceId})")
+                    try {
+                        collector.start()
+                    } catch (t: Throwable) {
+                        TrackerLog.add("collector.start failed: ${t.message}")
+                    }
+                    scope.launch { tick() }
                 }
                 return START_STICKY
             }
@@ -91,6 +102,7 @@ class TrackerService : Service() {
 
     private fun stopTracking() {
         running = false
+        cancelAlarm()
         releaseWakeLock()
         scope.launch {
             try {
@@ -106,65 +118,83 @@ class TrackerService : Service() {
         stopSelf()
     }
 
-    private suspend fun runLoop() {
-        TrackerLog.add("service started (device ${store.deviceId})")
+    private suspend fun tick() {
         try {
-            collector.start()
-        } catch (t: Throwable) {
-            TrackerLog.add("collector.start failed: ${t.message}")
-        }
-
-        while (running && scope.isActive) {
+            ensureBootstrap()
             try {
-                ensureBootstrap()
-                try {
-                    ensureConnected()
-                } catch (_: Exception) {
-                }
-
-                collector.scanWifi()
-
-                val payload = collector.telemetryJson().put("device_id", store.deviceId)
-                val bytes = payload.toString().toByteArray(Charsets.UTF_8)
-
-                val connected = mqtt?.isConnected == true
-                if (connected) {
-                    try {
-                        mqtt?.publish(store.topicTelemetry, bytes, 1, false)
-                        flushBuffer()
-                        TrackerLog.add("sent ts=${payload.optLong("ts")}")
-                    } catch (e: Exception) {
-                        buffer.append(payload.toString())
-                        TrackerLog.add("publish fail, buffered (${buffer.size()})")
-                    }
-                } else {
-                    buffer.append(payload.toString())
-                    TrackerLog.add("buffered (${buffer.size()})")
-                }
-            } catch (e: Exception) {
-                TrackerLog.add("loop error: ${e.message}")
+                ensureConnected()
+            } catch (_: Exception) {
             }
 
-            val interval = adaptiveInterval()
-            delay(interval * 1000L)
+            collector.scanWifi()
+
+            val payload = collector.telemetryJson().put("device_id", store.deviceId)
+            val bytes = payload.toString().toByteArray(Charsets.UTF_8)
+
+            val connected = mqtt?.isConnected == true
+            if (connected) {
+                try {
+                    mqtt?.publish(store.topicTelemetry, bytes, 1, false)
+                    flushBuffer()
+                    TrackerLog.add("sent ts=${payload.optLong("ts")}")
+                } catch (e: Exception) {
+                    buffer.append(payload.toString())
+                    TrackerLog.add("publish fail, buffered (${buffer.size()})")
+                }
+            } else {
+                buffer.append(payload.toString())
+                TrackerLog.add("buffered (${buffer.size()})")
+            }
+        } catch (e: Exception) {
+            TrackerLog.add("tick error: ${e.message}")
+        }
+
+        if (running) {
+            renewWakeLock()
+            scheduleNextAlarm()
         }
     }
 
-    private fun adaptiveInterval(): Long {
-        var sec = store.intervalSec.coerceIn(5, 3600).toLong()
-        if (collector.speed() > 15f) sec = (sec / 2).coerceAtLeast(5)
-        val bat = collector.batteryLevel()
-        if (bat in 1..15) sec = (sec * 3).coerceAtMost(3600)
-        return sec
+    private fun scheduleNextAlarm() {
+        val intervalSec = store.intervalSec.coerceIn(5, 3600)
+        val intervalMs = intervalSec * 1000L
+        val triggerAt = System.currentTimeMillis() + intervalMs
+
+        val intent = Intent(this, AlarmReceiver::class.java)
+        val pending = PendingIntent.getBroadcast(
+            this, ALARM_REQUEST_CODE, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val am = getSystemService(ALARM_SERVICE) as AlarmManager
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && am.canScheduleExactAlarms()) {
+                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+            } else {
+                am.setExact(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+            }
+        } catch (e: SecurityException) {
+            try {
+                am.set(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun cancelAlarm() {
+        val intent = Intent(this, AlarmReceiver::class.java)
+        val pending = PendingIntent.getBroadcast(
+            this, ALARM_REQUEST_CODE, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        (getSystemService(ALARM_SERVICE) as AlarmManager).cancel(pending)
+        pending.cancel()
     }
 
     private suspend fun ensureBootstrap() {
         if (store.brokerUri.isNotBlank()) return
-        if (store.serverUrl.isBlank()) {
-            TrackerLog.add("server url not set")
-            delay(10_000)
-            return
-        }
+        if (store.serverUrl.isBlank()) return
         TrackerLog.add("bootstrap POST ${store.serverUrl}/provision ...")
         try {
             val version = packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0"
@@ -182,7 +212,6 @@ class TrackerService : Service() {
             TrackerLog.add("bootstrap ok -> ${store.brokerUri}")
         } catch (e: Exception) {
             TrackerLog.add("bootstrap failed: ${e.message}")
-            delay(15_000)
         }
     }
 
@@ -293,6 +322,15 @@ class TrackerService : Service() {
             acquire(10 * 60 * 1000L)
         }
         TrackerLog.add("wake lock acquired")
+    }
+
+    private fun renewWakeLock() {
+        releaseWakeLock()
+        wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK, "${packageName}:tracker"
+        ).apply {
+            acquire(10 * 60 * 1000L)
+        }
     }
 
     private fun releaseWakeLock() {

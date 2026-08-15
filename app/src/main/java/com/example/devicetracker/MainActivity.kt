@@ -1,6 +1,7 @@
 package com.example.devicetracker
 
 import android.Manifest
+import android.app.AlarmManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -180,6 +181,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         try {
+            val am = getSystemService(ALARM_SERVICE) as android.app.AlarmManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !am.canScheduleExactAlarms()) {
+                try {
+                    startActivity(Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM))
+                    TrackerLog.add("requested exact alarm permission")
+                } catch (_: Exception) {}
+            }
+
             val i = Intent(this, TrackerService::class.java)
                 .setAction(TrackerService.ACTION_START)
             ContextCompat.startForegroundService(this, i)
