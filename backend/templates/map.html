@@ -18,7 +18,6 @@
             box-shadow: 0 2px 12px rgba(0,0,0,0.15); font-size: 13px;
         }
         #panel h3 { margin-bottom: 6px; font-size: 15px; }
-        #panel h3 .close { float: right; cursor: pointer; color: #999; font-weight: normal; }
         .device-row {
             padding: 6px 0; border-bottom: 1px solid #eee; cursor: pointer;
         }
@@ -41,14 +40,14 @@
             overflow-y: auto; display: none;
             box-shadow: 0 2px 12px rgba(0,0,0,0.15); font-size: 12px;
         }
-        #history-panel h4 { margin-bottom: 6px; font-size: 13px; cursor: pointer; }
+        #history-panel h4 { margin-bottom: 6px; font-size: 13px; }
         #history-panel .hdr { color: #999; font-size: 11px; margin-bottom: 4px; }
         .hist-row {
             padding: 3px 4px; border-bottom: 1px solid #f5f5f5; cursor: pointer;
             display: flex; justify-content: space-between; align-items: center;
         }
         .hist-row:hover { background: #e8f0fe; }
-        .hist-row .t { color: #555; font-size: 11px; }
+        .hist-row .t { color: #555; font-size: 11px; min-width: 50px; }
         .hist-row .c { color: #059669; font-size: 11px; font-family: monospace; }
         .hist-row .a { color: #999; font-size: 10px; margin-left: 6px; }
 
@@ -62,7 +61,13 @@
 <body>
     <div id="map"></div>
     <div id="panel"><h3>Devices</h3><div id="device-list">—</div></div>
-    <div id="history-panel"><h4 id="history-title">History</h4><div id="history-list"></div></div>
+    <div id="history-panel">
+        <h4 id="history-title">History</h4>
+        <div id="history-list"></div>
+        <div style="text-align:right;margin-top:4px">
+            <span style="cursor:pointer;color:#999;font-size:10px" id="history-close">close</span>
+        </div>
+    </div>
     <div id="status">connecting...</div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -81,8 +86,9 @@
                 deviceList = await resp.json();
                 renderPanel();
                 renderMarkers();
-                const st = document.getElementById('status');
-                st.textContent = 'updated ' + new Date().toLocaleTimeString() + ' · ' + deviceList.length + ' dev';
+                if (selectedDevice) loadHistory(selectedDevice);
+                document.getElementById('status').textContent =
+                    'updated ' + new Date().toLocaleTimeString() + ' · ' + deviceList.length + ' dev';
             } catch (e) {
                 document.getElementById('status').textContent = 'error: ' + e.message;
             }
@@ -92,14 +98,14 @@
             const el = document.getElementById('device-list');
             if (!deviceList.length) { el.innerHTML = '<div style="color:#999">no data</div>'; return; }
             el.innerHTML = deviceList.map(d => {
-                const age = d.ts ? Math.round((Date.now()/1000 - d.ts) / 60) : 999;
-                const lc = d.lat ? d.lat.toFixed(5) : '?';
-                const ln = d.lon ? d.lon.toFixed(5) : '?';
-                const badge = age < 2
+                var age = d.ts ? Math.round((Date.now()/1000 - d.ts) / 60) : 999;
+                var lc = d.lat ? d.lat.toFixed(5) : '?';
+                var ln = d.lon ? d.lon.toFixed(5) : '?';
+                var badge = age < 2
                     ? '<span class="badge badge-live">live</span>'
                     : '<span class="badge badge-old">' + age + 'm</span>';
-                const batt = d.battery_pct != null ? ' | batt ' + d.battery_pct + '%' : '';
-                const prov = d.provider ? d.provider : '';
+                var batt = d.battery_pct != null ? ' | batt ' + d.battery_pct + '%' : '';
+                var prov = d.provider ? d.provider : '';
                 return '<div class="device-row" onclick="selectDevice(\'' + d.device_id + '\')">'
                     + '<div class="did">' + d.device_id.slice(0, 8) + badge + '</div>'
                     + '<div class="pos">' + lc + ', ' + ln + '</div>'
@@ -109,21 +115,21 @@
         }
 
         function renderMarkers() {
-            const seen = new Set();
-            deviceList.forEach(d => {
+            var seen = {};
+            deviceList.forEach(function(d) {
                 if (!d.lat || !d.lon) return;
-                seen.add(d.device_id);
+                seen[d.device_id] = true;
                 if (markers[d.device_id]) {
                     markers[d.device_id].setLatLng([d.lat, d.lon]);
                     markers[d.device_id].setPopupContent(mkPopup(d));
                 } else {
-                    const m = L.marker([d.lat, d.lon]).addTo(map).bindPopup(mkPopup(d));
-                    m.on('click', () => selectDevice(d.device_id));
+                    var m = L.marker([d.lat, d.lon]).addTo(map).bindPopup(mkPopup(d));
+                    m.on('click', function() { selectDevice(d.device_id); });
                     markers[d.device_id] = m;
                 }
             });
-            Object.keys(markers).forEach(id => {
-                if (!seen.has(id)) { map.removeLayer(markers[id]); delete markers[id]; }
+            Object.keys(markers).forEach(function(id) {
+                if (!seen[id]) { map.removeLayer(markers[id]); delete markers[id]; }
             });
         }
 
@@ -140,10 +146,13 @@
             selectedDevice = id;
             document.getElementById('history-title').textContent = 'History: ' + id.slice(0, 12) + ' (loading...)';
             document.getElementById('history-panel').style.display = 'block';
+            loadHistory(id);
+        }
 
+        async function loadHistory(id) {
             try {
-                const resp = await fetch('/api/history/' + id + '?limit=200');
-                const points = await resp.json();
+                var resp = await fetch('/api/history/' + id + '?limit=200');
+                var points = await resp.json();
                 renderHistory(points);
                 renderTrack(id, points);
             } catch (e) {
@@ -152,12 +161,12 @@
         }
 
         function renderHistory(points) {
-            const el = document.getElementById('history-list');
+            var el = document.getElementById('history-list');
             document.getElementById('history-title').textContent = 'History: ' + selectedDevice.slice(0, 12) + ' (' + points.length + ')';
-            if (!points.length) { el.innerHTML = '<div style="color:#999">no points</div>'; return; }
+            if (!points.length) { el.innerHTML = '<div style="color:#999">no points yet</div>'; return; }
             el.innerHTML = '<div class="hdr">click row → center map</div>'
-                + points.filter(p => p.lat && p.lon).map(p => {
-                    const t = p.time ? p.time.slice(11, 19) : '—';
+                + points.filter(function(p) { return p.lat && p.lon; }).map(function(p) {
+                    var t = p.time ? p.time.slice(11, 19) : '—';
                     return '<div class="hist-row" onclick="centerPoint(' + p.lat + ',' + p.lon + ')">'
                         + '<span class="t">' + t + '</span>'
                         + '<span class="c">' + p.lat.toFixed(5) + ', ' + p.lon.toFixed(5) + '</span>'
@@ -168,7 +177,7 @@
 
         function renderTrack(id, points) {
             if (trackLines[id]) { map.removeLayer(trackLines[id]); delete trackLines[id]; }
-            const coords = points.filter(p => p.lat && p.lon).map(p => [p.lat, p.lon]);
+            var coords = points.filter(function(p) { return p.lat && p.lon; }).map(function(p) { return [p.lat, p.lon]; });
             if (coords.length < 2) return;
             trackLines[id] = L.polyline(coords, {
                 color: '#2563eb', weight: 2, opacity: 0.7, dashArray: '6,8'
@@ -183,15 +192,16 @@
             }).addTo(map).bindPopup(lat.toFixed(6) + ', ' + lon.toFixed(6)).openPopup();
         }
 
-        document.getElementById('history-title').addEventListener('click', function (e) {
-            if (e.target === this) {
-                document.getElementById('history-panel').style.display = 'none';
-                if (selectedDevice && trackLines[selectedDevice]) {
-                    map.removeLayer(trackLines[selectedDevice]);
-                    delete trackLines[selectedDevice];
-                }
-            }
-        });
+        function closeHistory() {
+            document.getElementById('history-panel').style.display = 'none';
+            selectedDevice = null;
+            Object.keys(trackLines).forEach(function(id) {
+                map.removeLayer(trackLines[id]);
+                delete trackLines[id];
+            });
+        }
+        document.getElementById('history-title').addEventListener('click', closeHistory);
+        document.getElementById('history-close').addEventListener('click', closeHistory);
 
         refresh();
         setInterval(refresh, 5000);
