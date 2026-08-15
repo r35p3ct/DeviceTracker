@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeviceTracker</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+        #map { width: 100%; height: 100vh; }
+
+        #panel {
+            position: absolute; top: 10px; right: 10px; z-index: 1000;
+            background: rgba(255,255,255,0.92); border-radius: 8px;
+            padding: 12px 16px; min-width: 230px; max-width: 300px;
+            max-height: 85vh; overflow-y: auto;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.15); font-size: 13px;
+        }
+        #panel h3 { margin-bottom: 6px; font-size: 15px; }
+        #panel h3 .close { float: right; cursor: pointer; color: #999; font-weight: normal; }
+        .device-row {
+            padding: 6px 0; border-bottom: 1px solid #eee; cursor: pointer;
+        }
+        .device-row:hover { background: #f0f4ff; }
+        .device-row:last-child { border-bottom: none; }
+        .device-row .did { font-family: monospace; color: #2563eb; font-size: 12px; }
+        .device-row .meta { color: #666; font-size: 11px; }
+        .device-row .pos { color: #059669; font-size: 11px; margin-top: 2px; }
+        .badge {
+            display: inline-block; padding: 1px 6px; border-radius: 4px;
+            font-size: 10px; margin-left: 6px; vertical-align: middle;
+        }
+        .badge-live { background: #dcfce7; color: #166534; }
+        .badge-old { background: #fee2e2; color: #991b1b; }
+
+        #history-panel {
+            position: absolute; bottom: 40px; left: 10px; z-index: 1000;
+            background: rgba(255,255,255,0.93); border-radius: 8px;
+            padding: 10px 14px; max-width: 320px; max-height: 45vh;
+            overflow-y: auto; display: none;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.15); font-size: 12px;
+        }
+        #history-panel h4 { margin-bottom: 6px; font-size: 13px; cursor: pointer; }
+        #history-panel .hdr { color: #999; font-size: 11px; margin-bottom: 4px; }
+        .hist-row {
+            padding: 3px 4px; border-bottom: 1px solid #f5f5f5; cursor: pointer;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .hist-row:hover { background: #e8f0fe; }
+        .hist-row .t { color: #555; font-size: 11px; }
+        .hist-row .c { color: #059669; font-size: 11px; font-family: monospace; }
+        .hist-row .a { color: #999; font-size: 10px; margin-left: 6px; }
+
+        #status {
+            position: absolute; bottom: 8px; left: 10px; z-index: 1000;
+            background: rgba(0,0,0,0.6); color: #fff; padding: 3px 10px;
+            border-radius: 4px; font-size: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <div id="panel"><h3>Devices</h3><div id="device-list">—</div></div>
+    <div id="history-panel"><h4 id="history-title">History</h4><div id="history-list"></div></div>
+    <div id="status">connecting...</div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const map = L.map('map', { attributionControl: false }).setView([55.75, 37.62], 12);
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+
+        const markers = {};
+        const trackLines = {};
+        let deviceList = [];
+        let selectedDevice = null;
+
+        async function refresh() {
+            try {
+                const resp = await fetch('/api/devices');
+                deviceList = await resp.json();
+                renderPanel();
+                renderMarkers();
+                const st = document.getElementById('status');
+                st.textContent = 'updated ' + new Date().toLocaleTimeString() + ' · ' + deviceList.length + ' dev';
+            } catch (e) {
+                document.getElementById('status').textContent = 'error: ' + e.message;
+            }
+        }
+
+        function renderPanel() {
+            const el = document.getElementById('device-list');
+            if (!deviceList.length) { el.innerHTML = '<div style="color:#999">no data</div>'; return; }
+            el.innerHTML = deviceList.map(d => {
+                const age = d.ts ? Math.round((Date.now()/1000 - d.ts) / 60) : 999;
+                const lc = d.lat ? d.lat.toFixed(5) : '?';
+                const ln = d.lon ? d.lon.toFixed(5) : '?';
+                const badge = age < 2
+                    ? '<span class="badge badge-live">live</span>'
+                    : '<span class="badge badge-old">' + age + 'm</span>';
+                const batt = d.battery_pct != null ? ' | batt ' + d.battery_pct + '%' : '';
+                const prov = d.provider ? d.provider : '';
+                return '<div class="device-row" onclick="selectDevice(\'' + d.device_id + '\')">'
+                    + '<div class="did">' + d.device_id.slice(0, 8) + badge + '</div>'
+                    + '<div class="pos">' + lc + ', ' + ln + '</div>'
+                    + '<div class="meta">' + prov + batt + '</div>'
+                    + '</div>';
+            }).join('');
+        }
+
+        function renderMarkers() {
+            const seen = new Set();
+            deviceList.forEach(d => {
+                if (!d.lat || !d.lon) return;
+                seen.add(d.device_id);
+                if (markers[d.device_id]) {
+                    markers[d.device_id].setLatLng([d.lat, d.lon]);
+                    markers[d.device_id].setPopupContent(mkPopup(d));
+                } else {
+                    const m = L.marker([d.lat, d.lon]).addTo(map).bindPopup(mkPopup(d));
+                    m.on('click', () => selectDevice(d.device_id));
+                    markers[d.device_id] = m;
+                }
+            });
+            Object.keys(markers).forEach(id => {
+                if (!seen.has(id)) { map.removeLayer(markers[id]); delete markers[id]; }
+            });
+        }
+
+        function mkPopup(d) {
+            return '<b>' + d.device_id.slice(0, 12) + '</b><br>'
+                + 'lat: ' + (d.lat ? d.lat.toFixed(6) : '?') + '<br>'
+                + 'lon: ' + (d.lon ? d.lon.toFixed(6) : '?') + '<br>'
+                + (d.accuracy != null ? 'acc: ' + d.accuracy + 'm<br>' : '')
+                + (d.provider ? 'prov: ' + d.provider + '<br>' : '')
+                + (d.battery_pct != null ? 'batt: ' + d.battery_pct + '%<br>' : '');
+        }
+
+        async function selectDevice(id) {
+            selectedDevice = id;
+            document.getElementById('history-title').textContent = 'History: ' + id.slice(0, 12) + ' (loading...)';
+            document.getElementById('history-panel').style.display = 'block';
+
+            try {
+                const resp = await fetch('/api/history/' + id + '?limit=200');
+                const points = await resp.json();
+                renderHistory(points);
+                renderTrack(id, points);
+            } catch (e) {
+                document.getElementById('history-list').innerHTML = '<div style="color:red">error</div>';
+            }
+        }
+
+        function renderHistory(points) {
+            const el = document.getElementById('history-list');
+            document.getElementById('history-title').textContent = 'History: ' + selectedDevice.slice(0, 12) + ' (' + points.length + ')';
+            if (!points.length) { el.innerHTML = '<div style="color:#999">no points</div>'; return; }
+            el.innerHTML = '<div class="hdr">click row → center map</div>'
+                + points.filter(p => p.lat && p.lon).map(p => {
+                    const t = p.time ? p.time.slice(11, 19) : '—';
+                    return '<div class="hist-row" onclick="centerPoint(' + p.lat + ',' + p.lon + ')">'
+                        + '<span class="t">' + t + '</span>'
+                        + '<span class="c">' + p.lat.toFixed(5) + ', ' + p.lon.toFixed(5) + '</span>'
+                        + '<span class="a">' + (p.accuracy || '?') + 'm</span>'
+                        + '</div>';
+                }).join('');
+        }
+
+        function renderTrack(id, points) {
+            if (trackLines[id]) { map.removeLayer(trackLines[id]); delete trackLines[id]; }
+            const coords = points.filter(p => p.lat && p.lon).map(p => [p.lat, p.lon]);
+            if (coords.length < 2) return;
+            trackLines[id] = L.polyline(coords, {
+                color: '#2563eb', weight: 2, opacity: 0.7, dashArray: '6,8'
+            }).addTo(map);
+            map.fitBounds(trackLines[id].getBounds().pad(0.1));
+        }
+
+        function centerPoint(lat, lon) {
+            map.setView([lat, lon], 17);
+            L.circleMarker([lat, lon], {
+                radius: 5, color: '#dc2626', fillColor: '#dc2626', fillOpacity: 0.8, weight: 2
+            }).addTo(map).bindPopup(lat.toFixed(6) + ', ' + lon.toFixed(6)).openPopup();
+        }
+
+        document.getElementById('history-title').addEventListener('click', function (e) {
+            if (e.target === this) {
+                document.getElementById('history-panel').style.display = 'none';
+                if (selectedDevice && trackLines[selectedDevice]) {
+                    map.removeLayer(trackLines[selectedDevice]);
+                    delete trackLines[selectedDevice];
+                }
+            }
+        });
+
+        refresh();
+        setInterval(refresh, 5000);
+    </script>
+</body>
+</html>
