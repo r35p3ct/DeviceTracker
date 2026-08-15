@@ -210,18 +210,23 @@
 
         async function loadHistory(id) {
             try {
-                var resp = await fetch('/api/history/' + id + '?limit=200');
-                var points = await resp.json();
-                renderHistory(points);
+                var resp = await fetch('/api/history/' + id + '?limit=1000');
+                var data = await resp.json();
+                if (data.error) throw new Error(data.error);
+                var points = data.points || [];
+                renderHistory(id, points, data.total);
                 renderTrack(id, points);
             } catch (e) {
                 document.getElementById('history-list').innerHTML = '<div style="color:red">error</div>';
             }
         }
 
-        function renderHistory(points) {
+        function renderHistory(id, points, total) {
             var el = document.getElementById('history-list');
-            document.getElementById('history-title').textContent = 'History: ' + selectedDevice.slice(0, 12) + ' (' + points.length + ')';
+            var totalTxt = (typeof total === 'number' && total !== points.length)
+                ? points.length + ' / ' + total : points.length;
+            document.getElementById('history-title').textContent =
+                'History: ' + id.slice(0, 12) + ' (' + totalTxt + ')';
             if (!points.length) { el.innerHTML = '<div style="color:#999">no points yet</div>'; return; }
             el.innerHTML = '<div class="hdr">click row \u2192 center map</div>'
                 + points.filter(function(p) { return p.lat && p.lon; }).map(function(p) {

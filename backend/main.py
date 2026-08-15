@@ -214,9 +214,13 @@ async def api_devices():
 
 
 @app.get("/api/history/{device_id}")
-async def api_history(device_id: str, limit: int = 200):
+async def api_history(device_id: str, limit: int = 1000):
     try:
         conn = get_pg()
+        total = conn.run(
+            "SELECT COUNT(*) FROM device_telemetry WHERE device_id = :device_id",
+            device_id=device_id,
+        )[0][0]
         rows = conn.run(
             """
             SELECT ts, lat, lon, accuracy, provider, battery_pct, speed
@@ -241,7 +245,7 @@ async def api_history(device_id: str, limit: int = 200):
                 "battery_pct": r[5],
                 "speed": r[6],
             })
-        return JSONResponse(result)
+        return JSONResponse({"total": total, "points": result})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 

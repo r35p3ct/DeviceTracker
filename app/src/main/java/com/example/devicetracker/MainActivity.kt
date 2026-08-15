@@ -21,6 +21,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
@@ -31,21 +34,45 @@ class MainActivity : AppCompatActivity() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.US)
+
+    private val statusUpdater = object : Runnable {
+        override fun run() {
+            if (store.trackingRunning) {
+                val last = store.lastSentTs
+                setStatus(
+                    if (last > 0) "tracking active, sent ${timeFmt.format(Date(last))}"
+                    else "tracking active"
+                )
+            }
+            mainHandler.postDelayed(this, 2000)
+        }
+    }
+
     private val permLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
             TrackerLog.add(
                 "permissions: fine=" + (result[Manifest.permission.ACCESS_FINE_LOCATION] ?: false) +
                     ", coarse=" + (result[Manifest.permission.ACCESS_COARSE_LOCATION] ?: false) +
-                    ", background=" + (result[Manifest.permission.ACCESS_BACKGROUND_LOCATION] ?: false) +
                     ", notif=" + (result[Manifest.permission.POST_NOTIFICATIONS] ?: false)
             )
             if (hasLocationPermission()) {
-                TrackerLog.add("location granted, auto-starting if configured")
-                autoStartIfConfigured()
+                TrackerLog.add("location granted")
+                requestBackgroundIfNeeded()
             } else {
                 TrackerLog.add("location denied, tracking disabled")
                 setStatus("location permission denied")
             }
+        }
+
+    private val bgPermLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            TrackerLog.add("background location permission: $granted")
+            if (!granted) {
+                TrackerLog.add("background location denied, opening app settings")
+                VendorSettings.openAppDetails(this)
+            }
+            autoStartIfConfigured()
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -84,6 +111,7 @@ class MainActivity : AppCompatActivity() {
                 scrollView.post { scrollView.fullScroll(ScrollView.FOCUS_DOWN) }
             }
         }
+        mainHandler.post(statusUpdater)
 
         findViewById<Button>(R.id.btn_start).setOnClickListener {
             saveFields()
@@ -93,6 +121,7 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btn_stop).setOnClickListener {
             TrackerLog.add("stop pressed")
+            setStatus("tracking stopped")
             val i = Intent(this, TrackerService::class.java)
                 .setAction(TrackerService.ACTION_STOP)
             startService(i)
@@ -105,6 +134,11 @@ class MainActivity : AppCompatActivity() {
                 autoRequestPermissions()
             }
         }
+    }
+
+    override fun onDestroy() {
+        mainHandler.removeCallbacks(statusUpdater)
+        super.onDestroy()
     }
 
     private fun hasLocationPermission(): Boolean =
@@ -120,6 +154,10 @@ class MainActivity : AppCompatActivity() {
         }
         if (!hasLocationPermission()) {
             setStatus("grant location permission to start")
+            return
+        }
+        if (!VendorSettings.hasBackgroundLocation(this)) {
+            setStatus("grant background location permission")
             return
         }
         TrackerLog.add("auto-start with server ${store.serverUrl}")
@@ -144,8 +182,7 @@ class MainActivity : AppCompatActivity() {
     private fun startIfPermitted() {
         val needed = mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.ACCESS_COARSE_LOCATION,
-            Manifest.permission.ACCESS_BACKGROUND_LOCATION
+            Manifest.permission.ACCESS_COARSE_LOCATION
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             needed.add(Manifest.permission.POST_NOTIFICATIONS)
@@ -153,11 +190,24 @@ class MainActivity : AppCompatActivity() {
         val missing = needed.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
-        if (missing.isEmpty()) {
-            startTracking()
-        } else {
+        if (missing.isNotEmpty()) {
             TrackerLog.add("requesting permissions from start button: $missing")
             permLauncher.launch(missing.toTypedArray())
+            return
+        }
+        requestBackgroundIfNeeded()
+    }
+
+    private fun requestBackgroundIfNeeded() {
+        if (VendorSettings.hasBackgroundLocation(this)) {
+            startTracking()
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            TrackerLog.add("requesting background location permission")
+            bgPermLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+        } else {
+            startTracking()
         }
     }
 
@@ -165,6 +215,12 @@ class MainActivity : AppCompatActivity() {
         if (store.serverUrl.isBlank()) {
             TrackerLog.add("server URL is empty")
             setStatus("set server URL first")
+            return
+        }
+        if (!VendorSettings.hasBackgroundLocation(this)) {
+            TrackerLog.add("background location missing, opening app settings")
+            VendorSettings.openAppDetails(this)
+            setStatus("grant background location in settings")
             return
         }
         setStatus("starting service...")
@@ -178,6 +234,13 @@ class MainActivity : AppCompatActivity() {
                 )
                 TrackerLog.add("requested battery optimization exemption")
             } catch (_: Exception) {}
+        }
+
+        if (!store.autostartPrompted) {
+            store.autostartPrompted = true
+            if (VendorSettings.openAutostartSettings(this)) {
+                TrackerLog.add("opened vendor autostart settings")
+            }
         }
 
         try {

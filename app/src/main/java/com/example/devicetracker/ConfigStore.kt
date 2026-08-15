@@ -34,6 +34,18 @@ class ConfigStore(context: Context) {
         get() = prefs.getBoolean("permissions_requested", false)
         set(value) = prefs.edit().putBoolean("permissions_requested", value).apply()
 
+    var autostartPrompted: Boolean
+        get() = prefs.getBoolean("autostart_prompted", false)
+        set(value) = prefs.edit().putBoolean("autostart_prompted", value).apply()
+
+    var trackingRunning: Boolean
+        get() = prefs.getBoolean("tracking_running", false)
+        set(value) = prefs.edit().putBoolean("tracking_running", value).apply()
+
+    var lastSentTs: Long
+        get() = prefs.getLong("last_sent_ts", 0)
+        set(value) = prefs.edit().putLong("last_sent_ts", value).apply()
+
     var brokerUri: String
         get() = prefs.getString("broker_uri", "") ?: ""
         set(value) = prefs.edit().putString("broker_uri", value).apply()

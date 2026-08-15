@@ -9,13 +9,17 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken
@@ -35,6 +39,7 @@ class TrackerService : Service() {
         private const val CHANNEL_ID = "tracker"
         private const val NOTIF_ID = 1
         private const val ALARM_REQUEST_CODE = 100
+        private const val WAKE_LOCK_TIMEOUT_MS = 60 * 60 * 1000L // 1 час
     }
 
     private val scope = CoroutineScope(
@@ -48,6 +53,16 @@ class TrackerService : Service() {
 
     private var mqtt: MqttClient? = null
     private var running = false
+    private var loopJob: Job? = null
+
+    private val tickHandler = Handler(Looper.getMainLooper())
+    private val tickRunnable = object : Runnable {
+        override fun run() {
+            if (!running) return
+            scope.launch { tick() }
+            tickHandler.postDelayed(this, intervalMs())
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -74,22 +89,20 @@ class TrackerService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_TICK -> {
-                scope.launch { tick() }
+                startForegroundCompat()
+                acquireWakeLock()
+                if (running) {
+                    scope.launch { tick() }
+                } else {
+                    TrackerLog.add("collector restart after kill/recreate")
+                    startLoop()
+                }
                 return START_STICKY
             }
             else -> {
                 startForegroundCompat()
                 acquireWakeLock()
-                if (!running) {
-                    running = true
-                    TrackerLog.add("service started (device ${store.deviceId})")
-                    try {
-                        collector.start()
-                    } catch (t: Throwable) {
-                        TrackerLog.add("collector.start failed: ${t.message}")
-                    }
-                    scope.launch { tick() }
-                }
+                startLoop()
                 return START_STICKY
             }
         }
@@ -100,8 +113,25 @@ class TrackerService : Service() {
         super.onDestroy()
     }
 
+    private fun startLoop() {
+        running = true
+        store.trackingRunning = true
+        TrackerLog.add("service started (device ${store.deviceId})")
+        try {
+            collector.start()
+        } catch (t: Throwable) {
+            TrackerLog.add("collector.start failed: ${t.message}")
+        }
+        tickHandler.removeCallbacks(tickRunnable)
+        tickHandler.post(tickRunnable)
+        scheduleNextAlarm()
+    }
+
     private fun stopTracking() {
         running = false
+        store.trackingRunning = false
+        tickHandler.removeCallbacks(tickRunnable)
+        loopJob?.cancel()
         cancelAlarm()
         releaseWakeLock()
         scope.launch {
@@ -136,6 +166,7 @@ class TrackerService : Service() {
                 try {
                     mqtt?.publish(store.topicTelemetry, bytes, 1, false)
                     flushBuffer()
+                    store.lastSentTs = System.currentTimeMillis()
                     TrackerLog.add("sent ts=${payload.optLong("ts")}")
                 } catch (e: Exception) {
                     buffer.append(payload.toString())
@@ -154,6 +185,8 @@ class TrackerService : Service() {
             scheduleNextAlarm()
         }
     }
+
+    private fun intervalMs(): Long = store.intervalSec.coerceIn(5, 3600) * 1000L
 
     private fun scheduleNextAlarm() {
         val intervalSec = store.intervalSec.coerceIn(5, 3600)
@@ -304,7 +337,10 @@ class TrackerService : Service() {
                 break
             }
         }
-        if (sent > 0) TrackerLog.add("flushed $sent buffered points")
+        if (sent > 0) {
+            store.lastSentTs = System.currentTimeMillis()
+            TrackerLog.add("flushed $sent buffered points")
+        }
     }
 
     private fun publishStatus(status: String) {
@@ -319,7 +355,7 @@ class TrackerService : Service() {
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK, "${packageName}:tracker"
         ).apply {
-            acquire(10 * 60 * 1000L)
+            acquire(WAKE_LOCK_TIMEOUT_MS)
         }
         TrackerLog.add("wake lock acquired")
     }
@@ -329,7 +365,7 @@ class TrackerService : Service() {
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK, "${packageName}:tracker"
         ).apply {
-            acquire(10 * 60 * 1000L)
+            acquire(WAKE_LOCK_TIMEOUT_MS)
         }
     }
 
