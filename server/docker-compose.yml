@@ -1,0 +1,16 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: tracker-mosquitto
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  provision:
+    build: ./provision
+    container_name: tracker-provision
+    ports:
+      - "8080:8080"
+    depends_on:
+      - mosquitto
