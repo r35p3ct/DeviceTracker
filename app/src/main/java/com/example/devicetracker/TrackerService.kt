@@ -113,24 +113,29 @@ class TrackerService : Service() {
         while (running && scope.isActive) {
             try {
                 ensureBootstrap()
-                ensureConnected()
+                try {
+                    ensureConnected()
+                } catch (_: Exception) {
+                }
+
                 collector.scanWifi()
 
                 val payload = collector.telemetryJson().put("device_id", store.deviceId)
                 val bytes = payload.toString().toByteArray(Charsets.UTF_8)
-                try {
-                    val connected = mqtt?.isConnected == true
-                    if (connected) {
+
+                val connected = mqtt?.isConnected == true
+                if (connected) {
+                    try {
                         mqtt?.publish(store.topicTelemetry, bytes, 1, false)
                         flushBuffer()
                         TrackerLog.add("sent ts=${payload.optLong("ts")}")
-                    } else {
+                    } catch (e: Exception) {
                         buffer.append(payload.toString())
-                        TrackerLog.add("not connected, buffered (${buffer.size()} pending)")
+                        TrackerLog.add("publish fail, buffered (${buffer.size()})")
                     }
-                } catch (e: Exception) {
+                } else {
                     buffer.append(payload.toString())
-                    TrackerLog.add("offline, buffered (${buffer.size()} pending): ${e.message}")
+                    TrackerLog.add("buffered (${buffer.size()})")
                 }
             } catch (e: Exception) {
                 TrackerLog.add("loop error: ${e.message}")
