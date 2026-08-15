@@ -1,7 +1,9 @@
 import json
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+
+MOSCOW = timezone(timedelta(hours=3))
 
 import paho.mqtt.client as mqtt
 import pg8000.native
@@ -82,7 +84,7 @@ def on_message(_client, _userdata, msg):
 
     device_id = data.get("device_id", msg.topic.split("/")[1])
     ts = data.get("ts", 0)
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else None
+    dt = datetime.fromtimestamp(ts, tz=MOSCOW).isoformat() if ts else None
 
     loc = data.get("loc") if isinstance(data.get("loc"), dict) else {}
     lat = loc.get("lat") or data.get("lat")
@@ -189,7 +191,7 @@ async def api_history(device_id: str, limit: int = 200):
         for r in rows:
             result.append({
                 "ts": r[0],
-                "time": datetime.fromtimestamp(r[0], tz=timezone.utc).isoformat() if r[0] else None,
+                "time": datetime.fromtimestamp(r[0], tz=MOSCOW).isoformat() if r[0] else None,
                 "lat": r[1],
                 "lon": r[2],
                 "accuracy": r[3],
