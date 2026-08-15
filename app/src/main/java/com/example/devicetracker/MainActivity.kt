@@ -3,10 +3,12 @@ package com.example.devicetracker
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
@@ -165,6 +167,18 @@ class MainActivity : AppCompatActivity() {
             return
         }
         setStatus("starting service...")
+
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+            try {
+                startActivity(
+                    Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                        .setData(Uri.parse("package:$packageName"))
+                )
+                TrackerLog.add("requested battery optimization exemption")
+            } catch (_: Exception) {}
+        }
+
         try {
             val i = Intent(this, TrackerService::class.java)
                 .setAction(TrackerService.ACTION_START)

@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -42,6 +43,7 @@ class TrackerService : Service() {
     private lateinit var store: ConfigStore
     private lateinit var collector: Collector
     private lateinit var buffer: OfflineBuffer
+    private var wakeLock: PowerManager.WakeLock? = null
 
     private var mqtt: MqttClient? = null
     private var running = false
@@ -72,6 +74,7 @@ class TrackerService : Service() {
             }
             else -> {
                 startForegroundCompat()
+                acquireWakeLock()
                 if (!running) {
                     running = true
                     scope.launch { runLoop() }
@@ -88,6 +91,7 @@ class TrackerService : Service() {
 
     private fun stopTracking() {
         running = false
+        releaseWakeLock()
         scope.launch {
             try {
                 publishStatus("offline")
@@ -279,6 +283,25 @@ class TrackerService : Service() {
             qos = 1
             isRetained = true
         })
+    }
+
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK, "${packageName}:tracker"
+        ).apply {
+            acquire(10 * 60 * 1000L)
+        }
+        TrackerLog.add("wake lock acquired")
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            wakeLock?.let {
+                if (it.isHeld) it.release()
+            }
+        } catch (_: Exception) {}
+        wakeLock = null
     }
 
     private fun startForegroundCompat() {
