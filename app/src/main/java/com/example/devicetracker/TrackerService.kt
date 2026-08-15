@@ -10,6 +10,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -34,7 +35,10 @@ class TrackerService : Service() {
         private const val NOTIF_ID = 1
     }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO +
+            CoroutineExceptionHandler { _, t -> TrackerLog.add("coroutine error: ${t.message}") }
+    )
     private lateinit var store: ConfigStore
     private lateinit var collector: Collector
     private lateinit var buffer: OfflineBuffer
@@ -44,15 +48,23 @@ class TrackerService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        TrackerLog.init(this)
         store = ConfigStore(this)
         collector = Collector(this)
         buffer = OfflineBuffer(File(filesDir, "buffer.jsonl"))
         createChannel()
+        val version = try {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+        } catch (_: Exception) {
+            "?"
+        }
+        TrackerLog.add("service onCreate, v$version")
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        TrackerLog.add("onStartCommand action=${intent?.action}")
         when (intent?.action) {
             ACTION_STOP -> {
                 stopTracking()
@@ -91,8 +103,12 @@ class TrackerService : Service() {
     }
 
     private suspend fun runLoop() {
-        collector.start()
         TrackerLog.add("service started (device ${store.deviceId})")
+        try {
+            collector.start()
+        } catch (t: Throwable) {
+            TrackerLog.add("collector.start failed: ${t.message}")
+        }
 
         while (running && scope.isActive) {
             try {
@@ -103,9 +119,15 @@ class TrackerService : Service() {
                 val payload = collector.telemetryJson().put("device_id", store.deviceId)
                 val bytes = payload.toString().toByteArray(Charsets.UTF_8)
                 try {
-                    mqtt?.publish(store.topicTelemetry, bytes, 1, false)
-                    flushBuffer()
-                    TrackerLog.add("sent ts=${payload.optLong("ts")}")
+                    val connected = mqtt?.isConnected == true
+                    if (connected) {
+                        mqtt?.publish(store.topicTelemetry, bytes, 1, false)
+                        flushBuffer()
+                        TrackerLog.add("sent ts=${payload.optLong("ts")}")
+                    } else {
+                        buffer.append(payload.toString())
+                        TrackerLog.add("not connected, buffered (${buffer.size()} pending)")
+                    }
                 } catch (e: Exception) {
                     buffer.append(payload.toString())
                     TrackerLog.add("offline, buffered (${buffer.size()} pending): ${e.message}")
@@ -134,7 +156,7 @@ class TrackerService : Service() {
             delay(10_000)
             return
         }
-        TrackerLog.add("bootstrap ${store.serverUrl} ...")
+        TrackerLog.add("bootstrap POST ${store.serverUrl}/provision ...")
         try {
             val version = packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0"
             val cfg = withContext(Dispatchers.IO) {
@@ -161,41 +183,47 @@ class TrackerService : Service() {
         if (uri.isBlank()) return
 
         TrackerLog.add("connecting $uri ...")
-        val client = MqttClient(uri, store.deviceId, MemoryPersistence())
-        val opts = MqttConnectOptions().apply {
-            isCleanSession = true
-            isAutomaticReconnect = true
-            connectionTimeout = 10
-            keepAliveInterval = 30
-            if (store.mqttUsername.isNotBlank()) userName = store.mqttUsername
-            if (store.mqttPassword.isNotBlank()) password = store.mqttPassword.toCharArray()
-            if (uri.startsWith("ssl://") && store.insecureTls) {
-                socketFactory = TlsUtil.trustAllSocketFactory()
+        try {
+            val client = MqttClient(uri, store.deviceId, MemoryPersistence())
+            val opts = MqttConnectOptions().apply {
+                isCleanSession = true
+                connectionTimeout = 15
+                keepAliveInterval = 90
+                maxReconnectDelay = 60
+                if (store.mqttUsername.isNotBlank()) userName = store.mqttUsername
+                if (store.mqttPassword.isNotBlank()) password = store.mqttPassword.toCharArray()
+                if (uri.startsWith("ssl://") && store.insecureTls) {
+                    socketFactory = TlsUtil.trustAllSocketFactory()
+                }
+                setWill(
+                    store.topicStatus,
+                    "offline".toByteArray(Charsets.UTF_8),
+                    1,
+                    true
+                )
             }
-            setWill(
-                store.topicStatus,
-                "offline".toByteArray(Charsets.UTF_8),
-                1,
-                true
-            )
-        }
-        client.setCallback(object : MqttCallback {
-            override fun connectionLost(cause: Throwable?) {
-                TrackerLog.add("connection lost: ${cause?.message}")
-            }
-            override fun messageArrived(topic: String?, message: MqttMessage?) {
-                handleMessage(topic, message?.payload?.toString(Charsets.UTF_8))
-            }
-            override fun deliveryComplete(token: IMqttDeliveryToken?) {}
-        })
+            client.setCallback(object : MqttCallback {
+                override fun connectionLost(cause: Throwable?) {
+                    TrackerLog.add("connection lost: ${cause?.message}")
+                }
+                override fun messageArrived(topic: String?, message: MqttMessage?) {
+                    handleMessage(topic, message?.payload?.toString(Charsets.UTF_8))
+                }
+                override fun deliveryComplete(token: IMqttDeliveryToken?) {}
+            })
 
-        client.connect(opts)
-        client.subscribe(store.topicConfig, 0)
-        client.subscribe(store.topicCmd, 0)
-        mqtt = client
-        publishStatus("online")
-        flushBuffer()
-        TrackerLog.add("connected, buffer=${buffer.size()}")
+            client.connect(opts)
+            client.subscribe(store.topicConfig, 0)
+            client.subscribe(store.topicCmd, 0)
+            mqtt = client
+            publishStatus("online")
+            flushBuffer()
+            TrackerLog.add("connected, buffer=${buffer.size()}")
+        } catch (e: Exception) {
+            TrackerLog.add("mqtt connect failed: ${e.message}")
+            mqtt = null
+            throw e
+        }
     }
 
     private fun handleMessage(topic: String?, payload: String?) {
@@ -250,10 +278,15 @@ class TrackerService : Service() {
 
     private fun startForegroundCompat() {
         val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
-        } else {
-            startForeground(NOTIF_ID, notification)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+            } else {
+                startForeground(NOTIF_ID, notification)
+            }
+            TrackerLog.add("startForeground ok")
+        } catch (e: Exception) {
+            TrackerLog.add("startForeground FAILED: ${e.message}")
         }
     }
 

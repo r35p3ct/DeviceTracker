@@ -47,5 +47,5 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     server = HTTPServer(("0.0.0.0", 8080), Handler)
-    print("provision server on :8080")
+    print("provision server on :8080", flush=True)
     server.serve_forever()

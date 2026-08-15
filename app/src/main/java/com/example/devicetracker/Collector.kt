@@ -52,18 +52,18 @@ class Collector(private val ctx: Context) {
             if (fine && locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                 locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 5000L, 0f, listener)
             }
-        } catch (_: SecurityException) {}
+        } catch (_: Exception) {}
         try {
             if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                 locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 10000L, 0f, listener)
             }
-        } catch (_: SecurityException) {}
+        } catch (_: Exception) {}
     }
 
     fun stop() {
         try {
             locationManager.removeUpdates(listener)
-        } catch (_: SecurityException) {}
+        } catch (_: Exception) {}
     }
 
     fun scanWifi() {
@@ -78,7 +78,7 @@ class Collector(private val ctx: Context) {
         val j = JSONObject()
         j.put("ts", System.currentTimeMillis() / 1000)
 
-        val loc = lastLocation
+        val loc = lastLocation ?: lastKnownLocation()
         if (loc != null) {
             j.put(
                 "loc", JSONObject()
@@ -110,6 +110,20 @@ class Collector(private val ctx: Context) {
         } catch (_: Exception) {
             -1
         }
+    }
+
+    private fun lastKnownLocation(): Location? {
+        var best: Location? = null
+        try {
+            if (hasFine()) {
+                best = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+            }
+        } catch (_: Exception) {}
+        try {
+            val net = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+            if (net != null && (best == null || net.time > best.time)) best = net
+        } catch (_: Exception) {}
+        return best
     }
 
     private fun collectCells(): JSONArray {

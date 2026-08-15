@@ -30,6 +30,10 @@ class ConfigStore(context: Context) {
         get() = prefs.getBoolean("insecure_tls", false)
         set(value) = prefs.edit().putBoolean("insecure_tls", value).apply()
 
+    var permissionsRequested: Boolean
+        get() = prefs.getBoolean("permissions_requested", false)
+        set(value) = prefs.edit().putBoolean("permissions_requested", value).apply()
+
     var brokerUri: String
         get() = prefs.getString("broker_uri", "") ?: ""
         set(value) = prefs.edit().putString("broker_uri", value).apply()
