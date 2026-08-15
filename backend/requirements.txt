@@ -3,3 +3,4 @@ uvicorn[standard]
 jinja2
 paho-mqtt
 pg8000
+python-dotenv

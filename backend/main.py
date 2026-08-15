@@ -1,6 +1,9 @@
 import json
 import os
 import threading
+
+from dotenv import load_dotenv
+load_dotenv()
 from datetime import datetime, timezone, timedelta
 
 MOSCOW = timezone(timedelta(hours=3))
