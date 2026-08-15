@@ -32,7 +32,7 @@ def make_cookie_token() -> str:
     ).hexdigest()
 
 def verify_token(request: Request, tracker_token: str = Cookie(default=None)) -> str:
-    if request.url.path == "/api/login":
+    if request.url.path in ("/api/login", "/"):
         return ""
     if not tracker_token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="no cookie")
