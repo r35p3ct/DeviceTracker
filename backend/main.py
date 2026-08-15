@@ -7,9 +7,13 @@ MOSCOW = timezone(timedelta(hours=3))
 
 import paho.mqtt.client as mqtt
 import pg8000.native
-from fastapi import FastAPI, Request
+import hmac
+import hashlib
+
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 
 MQTT_BROKER = os.environ.get("MQTT_BROKER", "localhost")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", 1883))
@@ -19,8 +23,43 @@ PG_USER = os.environ.get("PG_USER", "ttrss")
 PG_PASSWORD = os.environ.get("PG_PASSWORD", "ttrss")
 PG_DB = os.environ.get("PG_DB", "ttrss")
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", 8000))
+MAP_PASSWORD = os.environ.get("MAP_PASSWORD", "tracker")
+COOKIE_SECRET = os.environ.get("COOKIE_SECRET", os.urandom(32).hex())
 
-app = FastAPI(title="DeviceTracker Backend")
+def make_cookie_token() -> str:
+    return hmac.new(
+        COOKIE_SECRET.encode(), MAP_PASSWORD.encode(), hashlib.sha256
+    ).hexdigest()
+
+def verify_token(request: Request, tracker_token: str = Cookie(default=None)) -> str:
+    if request.url.path == "/api/login":
+        return ""
+    if not tracker_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="no cookie")
+    expected = make_cookie_token()
+    if not hmac.compare_digest(tracker_token, expected):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="bad token")
+    return tracker_token
+
+class LoginRequest(BaseModel):
+    password: str
+
+app = FastAPI(
+    title="DeviceTracker Backend",
+    dependencies=[Depends(verify_token)],
+)
+
+@app.post("/api/login")
+async def login(body: LoginRequest):
+    if body.password != MAP_PASSWORD:
+        raise HTTPException(status_code=401, detail="wrong password")
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie(
+        key="tracker_token", value=make_cookie_token(),
+        httponly=True, max_age=31536000, samesite="strict"
+    )
+    return resp
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 

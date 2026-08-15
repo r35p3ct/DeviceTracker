@@ -7,8 +7,31 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; }
         #map { width: 100%; height: 100vh; }
+        #login-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: #1a1a2e; z-index: 9999; display: flex;
+            align-items: center; justify-content: center;
+        }
+        #login-box {
+            background: #16213e; border-radius: 12px; padding: 32px 40px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.5); text-align: center;
+            min-width: 300px;
+        }
+        #login-box h2 { color: #e2e8f0; margin-bottom: 20px; font-size: 20px; }
+        #login-box input {
+            width: 100%; padding: 12px; border-radius: 6px; border: 1px solid #334155;
+            background: #0f172a; color: #e2e8f0; font-size: 15px; outline: none;
+        }
+        #login-box input:focus { border-color: #3b82f6; }
+        #login-box button {
+            width: 100%; margin-top: 14px; padding: 12px; border: none;
+            border-radius: 6px; background: #3b82f6; color: #fff; font-size: 15px;
+            cursor: pointer; font-weight: 600;
+        }
+        #login-box button:hover { background: #2563eb; }
+        #login-err { color: #f87171; margin-top: 10px; font-size: 13px; min-height: 20px; }
 
         #panel {
             position: absolute; top: 10px; right: 10px; z-index: 1000;
@@ -59,45 +82,81 @@
     </style>
 </head>
 <body>
-    <div id="map"></div>
-    <div id="panel"><h3>Devices</h3><div id="device-list">—</div></div>
-    <div id="history-panel">
+    <div id="login-overlay">
+        <div id="login-box">
+            <h2>DeviceTracker</h2>
+            <input type="password" id="login-pass" placeholder="password" autofocus />
+            <button onclick="doLogin()">Enter</button>
+            <div id="login-err"></div>
+        </div>
+    </div>
+
+    <div id="map" style="display:none"></div>
+    <div id="panel" style="display:none"><h3>Devices</h3><div id="device-list">—</div></div>
+    <div id="history-panel" style="display:none">
         <h4 id="history-title">History</h4>
         <div id="history-list"></div>
         <div style="text-align:right;margin-top:4px">
             <span style="cursor:pointer;color:#999;font-size:10px" id="history-close">close</span>
         </div>
     </div>
-    <div id="status">connecting...</div>
+    <div id="status" style="display:none">connecting...</div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-        const map = L.map('map', { attributionControl: false }).setView([55.75, 37.62], 12);
-        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+        var map, markers = {}, trackLines = {}, deviceList = [], selectedDevice = null;
 
-        const markers = {};
-        const trackLines = {};
-        let deviceList = [];
-        let selectedDevice = null;
+        async function doLogin() {
+            var pass = document.getElementById('login-pass').value;
+            var err = document.getElementById('login-err');
+            try {
+                var r = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: pass })
+                });
+                if (r.ok) {
+                    document.getElementById('login-overlay').style.display = 'none';
+                    document.getElementById('map').style.display = '';
+                    document.getElementById('panel').style.display = '';
+                    document.getElementById('status').style.display = '';
+                    initMap();
+                } else {
+                    err.textContent = 'wrong password';
+                }
+            } catch (e) {
+                err.textContent = 'network error';
+            }
+        }
+        document.getElementById('login-pass').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') doLogin();
+        });
+
+        function initMap() {
+            map = L.map('map', { attributionControl: false }).setView([55.75, 37.62], 12);
+            L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+            refresh();
+            setInterval(refresh, 5000);
+        }
 
         async function refresh() {
             try {
-                const resp = await fetch('/api/devices');
+                var resp = await fetch('/api/devices');
                 deviceList = await resp.json();
                 renderPanel();
                 renderMarkers();
                 if (selectedDevice) loadHistory(selectedDevice);
                 document.getElementById('status').textContent =
-                    'updated ' + new Date().toLocaleTimeString() + ' · ' + deviceList.length + ' dev';
+                    'updated ' + new Date().toLocaleTimeString() + ' \u00b7 ' + deviceList.length + ' dev';
             } catch (e) {
                 document.getElementById('status').textContent = 'error: ' + e.message;
             }
         }
 
         function renderPanel() {
-            const el = document.getElementById('device-list');
+            var el = document.getElementById('device-list');
             if (!deviceList.length) { el.innerHTML = '<div style="color:#999">no data</div>'; return; }
-            el.innerHTML = deviceList.map(d => {
+            el.innerHTML = deviceList.map(function(d) {
                 var age = d.ts ? Math.round((Date.now()/1000 - d.ts) / 60) : 999;
                 var lc = d.lat ? d.lat.toFixed(5) : '?';
                 var ln = d.lon ? d.lon.toFixed(5) : '?';
@@ -164,9 +223,9 @@
             var el = document.getElementById('history-list');
             document.getElementById('history-title').textContent = 'History: ' + selectedDevice.slice(0, 12) + ' (' + points.length + ')';
             if (!points.length) { el.innerHTML = '<div style="color:#999">no points yet</div>'; return; }
-            el.innerHTML = '<div class="hdr">click row → center map</div>'
+            el.innerHTML = '<div class="hdr">click row \u2192 center map</div>'
                 + points.filter(function(p) { return p.lat && p.lon; }).map(function(p) {
-                    var t = p.time ? p.time.slice(11, 19) : '—';
+                    var t = p.time ? p.time.slice(11, 19) : '\u2014';
                     return '<div class="hist-row" onclick="centerPoint(' + p.lat + ',' + p.lon + ')">'
                         + '<span class="t">' + t + '</span>'
                         + '<span class="c">' + p.lat.toFixed(5) + ', ' + p.lon.toFixed(5) + '</span>'
@@ -202,9 +261,6 @@
         }
         document.getElementById('history-title').addEventListener('click', closeHistory);
         document.getElementById('history-close').addEventListener('click', closeHistory);
-
-        refresh();
-        setInterval(refresh, 5000);
     </script>
 </body>
 </html>
