@@ -55,6 +55,7 @@
         }
         .badge-live { background: #dcfce7; color: #166534; }
         .badge-old { background: #fee2e2; color: #991b1b; }
+        .badge-off { background: #fef3c7; color: #92400e; }
 
         #history-panel {
             position: absolute; bottom: 40px; left: 10px; z-index: 1000;
@@ -73,6 +74,14 @@
         .hist-row .t { color: #555; font-size: 11px; min-width: 50px; }
         .hist-row .c { color: #059669; font-size: 11px; font-family: monospace; }
         .hist-row .a { color: #999; font-size: 10px; margin-left: 6px; }
+        .hist-row .check { margin-right: 6px; cursor: pointer; }
+        #route-actions { margin-top: 6px; display: flex; gap: 6px; }
+        #route-actions button {
+            flex: 1; padding: 6px 0; border: none; border-radius: 6px;
+            background: #3b82f6; color: #fff; font-size: 12px; cursor: pointer; font-weight: 600;
+        }
+        #route-actions button:disabled { background: #cbd5e1; cursor: default; }
+        #route-actions .route-clear { background: #475569; }
 
         #status {
             position: absolute; bottom: 8px; left: 10px; z-index: 1000;
@@ -96,6 +105,10 @@
     <div id="history-panel" style="display:none">
         <h4 id="history-title">History</h4>
         <div id="history-list"></div>
+        <div id="route-actions">
+            <button id="route-btn" onclick="buildRoute()" disabled>Route (0)</button>
+            <button class="route-clear" onclick="clearRoute()">Clear</button>
+        </div>
         <div style="text-align:right;margin-top:4px">
             <span style="cursor:pointer;color:#999;font-size:10px" id="history-close">close</span>
         </div>
@@ -104,7 +117,8 @@
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-        var map, markers = {}, trackLines = {}, deviceList = [], selectedDevice = null;
+        var map, markers = {}, deviceList = [], selectedDevice = null;
+        var selectedKeys = {}, currentPoints = [], routeLine = null, routeMarkers = [], selectedPointMarker = null;
 
         async function doLogin() {
             var pass = document.getElementById('login-pass').value;
@@ -160,9 +174,11 @@
                 var age = d.ts ? Math.round((Date.now()/1000 - d.ts) / 60) : 999;
                 var lc = d.lat ? d.lat.toFixed(5) : '?';
                 var ln = d.lon ? d.lon.toFixed(5) : '?';
-                var badge = age < 2
-                    ? '<span class="badge badge-live">live</span>'
-                    : '<span class="badge badge-old">' + age + 'm</span>';
+                var badge = d.online === false
+                    ? '<span class="badge badge-off">off</span>'
+                    : (age < 2
+                        ? '<span class="badge badge-live">live</span>'
+                        : '<span class="badge badge-old">' + age + 'm</span>');
                 var batt = d.battery_pct != null ? ' | batt ' + d.battery_pct + '%' : '';
                 var prov = d.provider ? d.provider : '';
                 return '<div class="device-row" onclick="selectDevice(\'' + d.device_id + '\')">'
@@ -201,7 +217,18 @@
                 + (d.battery_pct != null ? 'batt: ' + d.battery_pct + '%<br>' : '');
         }
 
+        function clearRouteLayers() {
+            if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+            routeMarkers.forEach(function(m) { map.removeLayer(m); });
+            routeMarkers = [];
+        }
+
         async function selectDevice(id) {
+            clearRouteLayers();
+            if (selectedPointMarker) { map.removeLayer(selectedPointMarker); selectedPointMarker = null; }
+            selectedKeys = {};
+            currentPoints = [];
+            updateRouteBtn();
             selectedDevice = id;
             document.getElementById('history-title').textContent = 'History: ' + id.slice(0, 12) + ' (loading...)';
             document.getElementById('history-panel').style.display = 'block';
@@ -215,23 +242,28 @@
                 if (data.error) throw new Error(data.error);
                 var points = data.points || [];
                 renderHistory(id, points, data.total);
-                renderTrack(id, points);
             } catch (e) {
                 document.getElementById('history-list').innerHTML = '<div style="color:red">error</div>';
             }
         }
 
         function renderHistory(id, points, total) {
+            currentPoints = points;
             var el = document.getElementById('history-list');
             var totalTxt = (typeof total === 'number' && total !== points.length)
                 ? points.length + ' / ' + total : points.length;
             document.getElementById('history-title').textContent =
                 'History: ' + id.slice(0, 12) + ' (' + totalTxt + ')';
+            updateRouteBtn();
             if (!points.length) { el.innerHTML = '<div style="color:#999">no points yet</div>'; return; }
-            el.innerHTML = '<div class="hdr">click row \u2192 center map</div>'
+            el.innerHTML = '<div class="hdr">click row \u2192 center map \u00b7 check 2+ \u2192 route (via extremes)</div>'
                 + points.filter(function(p) { return p.lat && p.lon; }).map(function(p) {
+                    var key = String(p.ts);
                     var t = p.time ? p.time.slice(11, 19) : '\u2014';
+                    var checked = selectedKeys[key] ? 'checked' : '';
                     return '<div class="hist-row" onclick="centerPoint(' + p.lat + ',' + p.lon + ')">'
+                        + '<input type="checkbox" class="check" data-key="' + key + '" ' + checked
+                        + ' onclick="event.stopPropagation()" onchange="togglePoint(this)">'
                         + '<span class="t">' + t + '</span>'
                         + '<span class="c">' + p.lat.toFixed(5) + ', ' + p.lon.toFixed(5) + '</span>'
                         + '<span class="a">' + (p.accuracy || '?') + 'm</span>'
@@ -239,30 +271,77 @@
                 }).join('');
         }
 
-        function renderTrack(id, points) {
-            if (trackLines[id]) { map.removeLayer(trackLines[id]); delete trackLines[id]; }
-            var coords = points.filter(function(p) { return p.lat && p.lon; }).map(function(p) { return [p.lat, p.lon]; });
-            if (coords.length < 2) return;
-            trackLines[id] = L.polyline(coords, {
-                color: '#2563eb', weight: 2, opacity: 0.7, dashArray: '6,8'
-            }).addTo(map);
-            map.fitBounds(trackLines[id].getBounds().pad(0.1));
-        }
-
         function centerPoint(lat, lon) {
             map.setView([lat, lon], 17);
-            L.circleMarker([lat, lon], {
+            if (selectedPointMarker) map.removeLayer(selectedPointMarker);
+            selectedPointMarker = L.circleMarker([lat, lon], {
                 radius: 5, color: '#dc2626', fillColor: '#dc2626', fillOpacity: 0.8, weight: 2
             }).addTo(map).bindPopup(lat.toFixed(6) + ', ' + lon.toFixed(6)).openPopup();
+        }
+
+        function togglePoint(cb) {
+            var key = cb.getAttribute('data-key');
+            if (cb.checked) selectedKeys[key] = true;
+            else delete selectedKeys[key];
+            updateRouteBtn();
+            autoRoute();
+        }
+
+        function updateRouteBtn() {
+            var n = Object.keys(selectedKeys).length;
+            var btn = document.getElementById('route-btn');
+            btn.textContent = 'Route (' + n + ')';
+            btn.disabled = n < 2;
+        }
+
+        function autoRoute() {
+            if (Object.keys(selectedKeys).length >= 2) {
+                buildRoute();
+            } else {
+                if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+                routeMarkers.forEach(function(m) { map.removeLayer(m); });
+                routeMarkers = [];
+            }
+        }
+
+        function buildRoute() {
+            clearRouteLayers();
+            var sel = currentPoints.filter(function(p) { return p.lat && p.lon && selectedKeys[String(p.ts)]; });
+            if (sel.length < 2) return;
+            var lo = Math.min.apply(null, sel.map(function(p) { return p.ts; }));
+            var hi = Math.max.apply(null, sel.map(function(p) { return p.ts; }));
+            var pts = currentPoints
+                .filter(function(p) { return p.lat && p.lon && p.ts != null && p.ts >= lo && p.ts <= hi; })
+                .sort(function(a, b) { return a.ts - b.ts; });
+            var coords = pts.map(function(p) { return [p.lat, p.lon]; });
+            if (coords.length < 2) return;
+            routeLine = L.polyline(coords, {
+                color: '#dc2626', weight: 3, opacity: 0.9, dashArray: '6,8'
+            }).addTo(map);
+            routeMarkers.push(L.circleMarker(coords[0], {
+                radius: 6, color: '#16a34a', fillColor: '#16a34a', fillOpacity: 0.85, weight: 2
+            }).addTo(map));
+            routeMarkers.push(L.circleMarker(coords[coords.length - 1], {
+                radius: 6, color: '#dc2626', fillColor: '#dc2626', fillOpacity: 0.85, weight: 2
+            }).addTo(map));
+            try { map.fitBounds(routeLine.getBounds().pad(0.1)); }
+            catch (e) { map.setView(coords[0], 17); }
+        }
+
+        function clearRoute() {
+            selectedKeys = {};
+            clearRouteLayers();
+            updateRouteBtn();
+            if (selectedDevice) loadHistory(selectedDevice);
         }
 
         function closeHistory() {
             document.getElementById('history-panel').style.display = 'none';
             selectedDevice = null;
-            Object.keys(trackLines).forEach(function(id) {
-                map.removeLayer(trackLines[id]);
-                delete trackLines[id];
-            });
+            selectedKeys = {};
+            currentPoints = [];
+            clearRouteLayers();
+            if (selectedPointMarker) { map.removeLayer(selectedPointMarker); selectedPointMarker = null; }
         }
         document.getElementById('history-title').addEventListener('click', closeHistory);
         document.getElementById('history-close').addEventListener('click', closeHistory);

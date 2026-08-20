@@ -52,6 +52,12 @@ app = FastAPI(
     dependencies=[Depends(verify_token)],
 )
 
+@app.middleware("http")
+async def no_cache(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
 @app.post("/api/login")
 async def login(body: LoginRequest):
     if body.password != MAP_PASSWORD:
@@ -204,13 +210,44 @@ async def startup():
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("map.html", {"request": request})
+    return templates.TemplateResponse(request, "map.html")
 
 
 @app.get("/api/devices")
 async def api_devices():
     with lock:
-        return JSONResponse(list(devices.values()))
+        mem = list(devices.values())
+    try:
+        conn = get_pg()
+        rows = conn.run(
+            """
+            SELECT DISTINCT ON (device_id)
+                device_id, ts, lat, lon, accuracy, provider, battery_pct, speed
+            FROM device_telemetry
+            WHERE lat IS NOT NULL AND lon IS NOT NULL
+            ORDER BY device_id, ts DESC
+            """
+        )
+        conn.close()
+        merged = {}
+        for r in rows:
+            merged[r[0]] = {
+                "device_id": r[0],
+                "ts": r[1],
+                "lat": r[2],
+                "lon": r[3],
+                "accuracy": r[4],
+                "provider": r[5],
+                "battery_pct": r[6],
+                "speed": r[7],
+                "online": False,
+            }
+        for p in mem:
+            merged[p["device_id"]] = dict(p, online=True)
+        return JSONResponse(list(merged.values()))
+    except Exception as e:
+        print(f"api_devices PG error: {e}")
+        return JSONResponse(list(mem))
 
 
 @app.get("/api/history/{device_id}")
